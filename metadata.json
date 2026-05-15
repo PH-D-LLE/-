@@ -1,0 +1,6 @@
+{
+  "name": "Smart Regional Data Splitter",
+  "description": "AI 기반 지역별 회원 분담금 데이터 분리 및 자동화 시스템. 통합 데이터를 지역별로 추출하고 인원수 기반 시트명을 자동 생성합니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
