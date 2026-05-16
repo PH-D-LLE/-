@@ -31,6 +31,7 @@ import { parseFullWorkbook, splitWorkbookByRegion, downloadRegionalWorkbooks, Wo
 import { analyzeHeaders, diagnoseError, generateCustomDraft } from './lib/gemini';
 import { calculateSettlement, SettlementTotal, BRANCH_INFO } from './lib/settlement';
 import { MOCK_HISTORY, SettlementHistoryEntry } from './lib/history';
+import { getSupabase } from './lib/supabase';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -61,7 +62,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'splitter' | 'manual' | 'auto' | 'dashboard'>('splitter');
   
   // Dashboard / History State
-  const [history, setHistory] = useState<SettlementHistoryEntry[]>(MOCK_HISTORY);
+  const [history, setHistory] = useState<SettlementHistoryEntry[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isDeletingId, setIsDeletingId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [manualPeriod, setManualPeriod] = useState("2026년 2분기");
   const [autoPeriod, setAutoPeriod] = useState("2026년 2분기");
@@ -70,33 +73,88 @@ export default function App() {
   const [editForm, setEditForm] = useState<SettlementHistoryEntry | null>(null);
   
   // Dashboard Action
-  const addToHistory = (settlement: SettlementTotal, period: string) => {
-    const gyeongbuk = settlement.results.find(r => r.region === '경북');
+  const addToHistory = async (settlement: SettlementTotal, period: string) => {
+    if (!settlement) {
+      addLog("정산 데이터가 없습니다.", "error");
+      return;
+    }
+
     const gumi = settlement.results.find(r => r.region === '구미');
     const sangju = settlement.results.find(r => r.region === '상주');
     const gyeongju = settlement.results.find(r => r.region === '경주');
 
     const newEntry: SettlementHistoryEntry = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: crypto.randomUUID?.() || Math.random().toString(36).substr(2, 9) + Date.now().toString(36),
       period: period,
       total: settlement.totalDistributed,
       gyeongbuk: settlement.totalGyeongbukIncome,
       gumi: gumi?.finalPayment || 0,
       sangju: sangju?.finalPayment || 0,
       gyeongju: gyeongju?.finalPayment || 0,
-      createdAt: new Date().toISOString()
+      createdat: new Date().toISOString()
     };
 
+    // Update local state and UI immediately for responsiveness
     setHistory(prev => [newEntry, ...prev]);
-    addLog(`'${period}' 정산 내역이 대시보드에 기록되었습니다.`, 'success');
+    addLog(`'${period}' 정산 내역이 대시보드에 업데이트되었습니다.`, 'success');
+    
+    // Switch to dashboard first so user can see progress
     setActiveTab('dashboard');
+
+    // Save to Supabase in background
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { error } = await supabase.from('settlement_history').insert([newEntry]);
+        if (error) {
+          console.error("Supabase insert error:", error);
+          throw error;
+        }
+        addLog(`클라우드 데이터베이스(Supabase)에 성공적으로 저장되었습니다.`, 'success');
+      } catch (err: any) {
+        console.error("Supabase insert error:", err);
+        const isPolicyError = err.message?.includes("403") || err.code === '42501';
+        addLog(`DB 저장 실패: ${err.message || '네트워크 오류'}`, 'error');
+        
+        if (isPolicyError) {
+          addLog("권한 오류: Supabase Table Editor에서 'settlement_history' 테이블의 RLS Policies에 INSERT 권한을 anon 역할에 추가해야 합니다.", "info");
+        }
+      }
+    } else {
+      const url = import.meta.env.VITE_SUPABASE_URL;
+      if (url && (url.includes("supabase.com") || !url.startsWith("http"))) {
+        addLog("Supabase URL이 잘못되었습니다. 'https://xxx.supabase.co' 형태의 API URL을 입력해주세요.", "error");
+      } else {
+        addLog("Supabase 설정이 없어 로컬에만 저장되었습니다. (Settings 메뉴에서 API 설정을 완료해주세요)", "info");
+      }
+    }
   };
 
-  const deleteHistoryEntry = (id: string) => {
-    // Avoid window.confirm in iframe if possible, or just note it might be restricted.
-    // For now, let's just perform the deletion directly to ensure it works as requested.
+  const deleteHistoryEntry = async (id: string) => {
+    if (!confirm("이 정산 내역을 정말로 삭제하시겠습니까?")) return;
+    
+    setIsDeletingId(id);
+    // Save to Supabase
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { error } = await supabase.from('settlement_history').delete().eq('id', id);
+        if (error) {
+          console.error("Supabase delete error:", error);
+          throw error;
+        }
+        addLog("클라우드 데이터베이스에서 내역이 삭제되었습니다.", 'info');
+      } catch (err: any) {
+        addLog(`DB 삭제 실패: ${err.message}.`, 'error');
+        if (err.message.includes("403") || err.message.includes("policy")) {
+          addLog("팁: Supabase Table Editor -> RLS Policies에서 DELETE 권한을 'anon'에 허용해주세요.", "info");
+        }
+      }
+    }
+
     setHistory(prev => prev.filter(entry => entry.id !== id));
-    addLog("정산 내역이 삭제되었습니다.", 'info');
+    addLog("정산 내역이 화면에서 삭제되었습니다.", 'info');
+    setIsDeletingId(null);
   };
 
   const startEditing = (entry: SettlementHistoryEntry) => {
@@ -109,8 +167,31 @@ export default function App() {
     setEditForm(null);
   };
 
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (!editForm) return;
+
+    // Save to Supabase
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        const { error } = await supabase
+          .from('settlement_history')
+          .update(editForm)
+          .eq('id', editForm.id);
+        if (error) {
+          console.error("Supabase update error:", error);
+          throw error;
+        }
+        addLog(`'${editForm.period}' 내역이 클라우드에 업데이트되었습니다.`, 'success');
+      } catch (err: any) {
+        addLog(`DB 업데이트 실패: ${err.message}`, 'error');
+        if (err.message.includes("403") || err.message.includes("policy")) {
+          addLog("팁: Supabase의 RLS Policies에서 UPDATE 권한을 확인해주세요.", "info");
+        }
+        // Even if DB fails, update local state to keep UI working
+      }
+    }
+
     setHistory(prev => prev.map(entry => entry.id === editForm.id ? editForm : entry));
     setEditingId(null);
     setEditForm(null);
@@ -141,6 +222,44 @@ export default function App() {
     }
   }, [logs]);
 
+  // Load history from Supabase
+  useEffect(() => {
+    const fetchHistory = async () => {
+      const supabase = getSupabase();
+      if (!supabase) {
+        setHistory(MOCK_HISTORY);
+        return;
+      }
+
+      setIsLoadingHistory(true);
+      try {
+        const { data, error } = await supabase
+          .from('settlement_history')
+          .select('*')
+          .order('createdat', { ascending: false });
+
+        if (error) throw error;
+        if (data && data.length > 0) {
+          setHistory(data as SettlementHistoryEntry[]);
+        } else {
+          setHistory(MOCK_HISTORY);
+        }
+      } catch (err: any) {
+        const errorMessage = err.message === 'Failed to fetch' 
+          ? 'Supabase URL이 잘못되었거나 네트워크 연결이 원활하지 않습니다. https://xxx.supabase.co 형태의 API URL을 입력했는지 확인해주세요.'
+          : err.message;
+        
+        console.error('Error fetching history:', err.message);
+        addLog(`데이터베이스 연동 실패: ${errorMessage}`, 'error');
+        setHistory(MOCK_HISTORY);
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    };
+
+    fetchHistory();
+  }, []);
+
   const addLog = (message: string, type: 'info' | 'error' | 'success' = 'info') => {
     setLogs(prev => [...prev, {
       message,
@@ -155,11 +274,12 @@ export default function App() {
   };
 
   const getMailDraft = (region: string) => {
-    const title = `[분담금 지급 안내] 2026년 1분기 지회 분담금 지급 상세 내역 송부 (${region}지회)`;
+    const regionalName = region === '경북' ? '경북지부' : `${region}지회`;
+    const title = `[분담금 지급 안내] 2026년 1분기 분담금 지급 상세 내역 송부 (${regionalName})`;
     const body = `안녕하세요^^
 화창한 햇살이 가득한 계절입니다. ${region} 지역 평생교육사분들의 권익 증진과 현장의 변화를 위해 헌신하시는 귀 지회에 안부 인사를 전합니다.
 
-"평생교육은 개인의 성장을 넘어 지역사회의 지속가능한 발전을 이끄는 핵심 동력입니다." ${region}지회의 열정적인 활동은 협회 전체에 큰 귀감이 되고 있습니다.
+"평생교육은 개인의 성장을 넘어 지역사회의 지속가능한 발전을 이끄는 핵심 동력입니다." ${regionalName}의 열정적인 활동은 협회 전체에 큰 귀감이 되고 있습니다.
 
 본회 통보에 따라 지난 4월 30일 자로 수령한 **'2026년 1분기 분담금'**을 금일 지급해 드리고자 합니다. 첨부된 상세 내역을 확인해 주시면 감사하겠습니다.
 
@@ -172,14 +292,14 @@ export default function App() {
     
     try {
       setIsGeneratingDraft(true);
-      addLog(`${activeEmailRegion} 지부용 맞춤 문구 생성 중...`, 'info');
+      addLog(`${activeEmailRegion} 지회용 맞춤 문구 생성 중...`, 'info');
       const draft = await generateCustomDraft(activeEmailRegion, customRequirement, activeMessageType);
       if (draft) {
         setCustomDrafts(prev => ({
           ...prev,
           [`${activeEmailRegion}_${activeMessageType}`]: draft
         }));
-        addLog(`${activeEmailRegion} 지부용 맞춤 문구가 재생성되었습니다.`, 'success');
+        addLog(`${activeEmailRegion} 지회용 맞춤 문구가 재생성되었습니다.`, 'success');
       }
     } catch (err: any) {
       addLog(`문구 생성 오류: ${err.message}`, 'error');
@@ -189,8 +309,9 @@ export default function App() {
   };
 
   const getSmsDraft = (region: string) => {
+    const regionalName = region === '경북' ? '경북지부' : `${region}지회`;
     return `[경북평생교육사협회]
-안녕하세요, ${region}지회님!
+안녕하세요, ${regionalName}님!
 2026년 1분기 분담금이 금일 지급되었습니다. 
 자세한 내역은 이메일로 송부드린 첨부파일을 확인 부탁드립니다.
 귀 지회의 헌신에 늘 감사드립니다.`;
@@ -304,7 +425,7 @@ export default function App() {
     const settlement = calculateSettlement(counts);
     setAutoSettlementData(settlement);
     
-    addLog(`총 ${results.length}개 지부의 인원 데이터가 정산 메뉴로 전송되었습니다.`, 'success');
+    addLog(`총 ${results.length}개 지회의 인원 데이터가 정산 메뉴로 전송되었습니다.`, 'success');
     setActiveTab('manual');
   };
 
@@ -349,6 +470,22 @@ export default function App() {
       prev.includes(region) ? prev.filter(r => r !== region) : [...prev, region]
     );
   };
+
+  const filteredHistory = history.filter(entry => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return true;
+    
+    // Search in period names
+    if (entry.period.toLowerCase().includes(q)) return true;
+    
+    // Search in branch names strictly if they have amounts
+    if (q === "경북" || q === "경북지부") return entry.gyeongbuk > 0;
+    if (q === "구미" || q === "구미지회") return entry.gumi > 0;
+    if (q === "상주" || q === "상주지회") return entry.sangju > 0;
+    if (q === "경주" || q === "경주지회") return entry.gyeongju > 0;
+    
+    return false;
+  });
 
   return (
     <div className="min-h-screen pb-12">
@@ -549,7 +686,7 @@ export default function App() {
                     <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                       <div className="flex items-center gap-2">
                         <div className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] font-bold">2</div>
-                        <h2 className="font-semibold text-slate-800">지부별 파일 생성 대상 설정</h2>
+                        <h2 className="font-semibold text-slate-800">지회별 파일 생성 대상 설정</h2>
                       </div>
                       <div className="flex gap-2">
                         <button onClick={() => setSelectedRegions(detectedRegions)} className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded font-bold text-slate-600 transition-colors">전체 선택</button>
@@ -640,7 +777,7 @@ export default function App() {
                   {Object.keys(manualCounts).map(region => (
                     <div key={region} className="space-y-3">
                       <label className="text-sm font-bold text-slate-700 flex items-center justify-between">
-                        <span>{region}지부 회원 수</span>
+                        <span>{region === '경북' ? '경북지부' : region + '지회'} 회원 수</span>
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Input count</span>
                       </label>
                       <div className="relative group">
@@ -749,7 +886,7 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="text-xl font-bold text-slate-900 tracking-tight">자동 엑셀 정산 분석기</h2>
-                    <p className="text-sm text-slate-500 font-medium">회원 명부가 담긴 엑셀을 업로드하면 지부별 지급액을 자동 산출합니다.</p>
+                    <p className="text-sm text-slate-500 font-medium">회원 명부가 담긴 엑셀을 업로드하면 지회별 지급액을 자동 산출합니다.</p>
                   </div>
                 </div>
 
@@ -886,21 +1023,14 @@ export default function App() {
                         <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b">기간 (분기)</th>
                         <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">합계 (원)</th>
                         <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">경북지부</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">구미지부</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">상주지부</th>
-                        <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">경주지부</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">구미지회</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">상주지회</th>
+                        <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-right">경주지회</th>
                         <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b text-center">관리</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {history
-                        .filter(entry => {
-                          const q = searchQuery.toLowerCase();
-                          return entry.period.toLowerCase().includes(q) || 
-                                 "경북".includes(q) || "구미".includes(q) || 
-                                 "상주".includes(q) || "경주".includes(q);
-                        })
-                        .map((entry) => (
+                      {filteredHistory.map((entry) => (
                         <tr key={entry.id} className="group hover:bg-slate-50/80 transition-colors">
                           <td className="px-6 py-5 border-b border-slate-100">
                              <div className="flex items-center gap-2">
@@ -993,8 +1123,20 @@ export default function App() {
                                    <button onClick={() => startEditing(entry)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="수정">
                                      <Edit3 size={16} />
                                    </button>
-                                   <button onClick={() => deleteHistoryEntry(entry.id)} className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors" title="삭제">
-                                     <Trash2 size={16} />
+                                   <button 
+                                     onClick={() => deleteHistoryEntry(entry.id)} 
+                                     className={cn(
+                                       "p-2 rounded-lg transition-colors",
+                                       isDeletingId === entry.id ? "text-slate-300 animate-pulse" : "text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                                     )} 
+                                     disabled={isDeletingId === entry.id}
+                                     title="삭제"
+                                   >
+                                     {isDeletingId === entry.id ? (
+                                       <div className="w-4 h-4 border-2 border-slate-300 border-t-rose-500 rounded-full animate-spin" />
+                                     ) : (
+                                       <Trash2 size={16} />
+                                     )}
                                    </button>
                                  </>
                                )}
@@ -1002,14 +1144,9 @@ export default function App() {
                           </td>
                         </tr>
                       ))}
-                      {history.filter(entry => {
-                        const q = searchQuery.toLowerCase();
-                        return entry.period.toLowerCase().includes(q) || 
-                               "경북".includes(q) || "구미".includes(q) || 
-                               "상주".includes(q) || "경주".includes(q);
-                      }).length === 0 && (
+                      {filteredHistory.length === 0 && (
                         <tr>
-                          <td colSpan={6} className="px-6 py-20 text-center text-slate-400">
+                          <td colSpan={7} className="px-6 py-20 text-center text-slate-400">
                              <div className="flex flex-col items-center gap-3">
                                 <Search size={32} className="opacity-20" />
                                 <p className="text-sm font-medium">검색 결과가 없습니다.</p>
@@ -1036,7 +1173,7 @@ export default function App() {
                       <div className="relative z-10">
                         <p className="text-[9px] font-bold text-indigo-100 uppercase tracking-widest mb-0.5">최근 정산일</p>
                         <p className="text-lg font-black leading-none">
-                          {history.length > 0 ? new Date(history[0].createdAt).toLocaleDateString().replace(/\.$/, '') : "-"}
+                          {history.length > 0 ? new Date(history[0].createdat).toLocaleDateString().replace(/\.$/, '') : "-"}
                         </p>
                       </div>
                       <Users className="text-white/5 w-12 h-12" />
@@ -1099,7 +1236,7 @@ export default function App() {
               {isProcessing && (
                 <div className="flex gap-3 animate-pulse">
                    <span className="text-[10px] text-slate-600 mt-1 tabular-nums font-bold">WORKING</span>
-                   <span className="text-indigo-400">지부별 데이터 필터링 및 시트명 생성 중...</span>
+                   <span className="text-indigo-400">지회별 데이터 필터링 및 시트명 생성 중...</span>
                 </div>
               )}
             </div>
@@ -1374,8 +1511,8 @@ export default function App() {
                         <Mail size={40} strokeWidth={1} />
                       </div>
                       <div className="text-center">
-                        <p className="text-base font-bold text-slate-400">지부를 선택해주세요</p>
-                        <p className="text-sm font-medium mt-1">해당 지부명에 맞춘 개인화된 메일 문구가 생성됩니다.</p>
+                        <p className="text-base font-bold text-slate-400">지회를 선택해주세요</p>
+                        <p className="text-sm font-medium mt-1">해당 지회명에 맞춘 개인화된 메일 문구가 생성됩니다.</p>
                       </div>
                     </div>
                   )}
@@ -1396,7 +1533,7 @@ export default function App() {
               <span>PRD 준수 데이터 관리</span>
             </div>
             <p className="text-xs text-slate-500 leading-relaxed font-medium">
-              통합 시트에서 '회원구분' 열을 기준으로 데이터를 추출하고, 각 지부별로 독립된 워크북 파일을 자동 생성합니다.
+              통합 시트에서 '회원구분' 열을 기준으로 데이터를 추출하고, 각 지회별로 독립된 워크북 파일을 자동 생성합니다.
             </p>
           </div>
           <div className="space-y-3">

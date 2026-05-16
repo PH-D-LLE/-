@@ -73,12 +73,13 @@ export async function generateCustomDraft(region: string, userInput: string, typ
       model: "gemini-3-flash-preview",
       contents: `
         당신은 협회 행정 사무를 지원하는 AI 비서입니다.
-        지역: ${region}
+        지역: ${region === '경북' ? '경북지부' : region + '지회'}
         사용자의 요구사항/참고내용: "${userInput}"
         출력 형식: ${type === 'mail' ? '이메일 (제목과 본문)' : 'SMS/문자 (본문만)'}
 
         요구사항을 바탕으로 정중하고 따뜻한 톤으로 문구를 작성해주세요.
         협회 명칭은 '경북평생교육사협회'를 기본으로 사용하세요.
+        지역 명칭을 언급할 때는 '${region === '경북' ? '지부' : '지회'}'라는 표현을 적절히 사용하세요.
         
         출력은 반드시 JSON 형식이어야 합니다.
       `,

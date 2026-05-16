@@ -7,7 +7,7 @@ export interface SettlementHistoryEntry {
   gumi: number;
   sangju: number;
   gyeongju: number;
-  createdAt: string;
+  createdat: string;
 }
 
 export const MOCK_HISTORY: SettlementHistoryEntry[] = [];
