@@ -107,25 +107,31 @@ export default function App() {
       try {
         const { error } = await supabase.from('settlement_history').insert([newEntry]);
         if (error) {
-          console.error("Supabase insert error:", error);
+          console.error("Supabase insert error details:", error);
           throw error;
         }
         addLog(`클라우드 데이터베이스(Supabase)에 성공적으로 저장되었습니다.`, 'success');
       } catch (err: any) {
         console.error("Supabase insert error:", err);
-        const isPolicyError = err.message?.includes("403") || err.code === '42501';
+        const isAuthError = err.message?.includes("403") || err.code === '42501' || err.status === 403;
         addLog(`DB 저장 실패: ${err.message || '네트워크 오류'}`, 'error');
         
-        if (isPolicyError) {
-          addLog("권한 오류: Supabase Table Editor에서 'settlement_history' 테이블의 RLS Policies에 INSERT 권한을 anon 역할에 추가해야 합니다.", "info");
+        if (isAuthError) {
+          addLog("권한 오류(RLS) 발생: Supabase 'Authentication' -> 'Policies' 메뉴에서 'settlement_history' 테이블에 INSERT 권한(anon 역할용)을 추가해주세요.", "info");
+        } else if (err.message === 'Failed to fetch') {
+          addLog("네트워크 오류: Supabase URL이 정확한지 확인해주세요. (https://xxx.supabase.co 형식)", "info");
         }
       }
     } else {
       const url = import.meta.env.VITE_SUPABASE_URL;
-      if (url && (url.includes("supabase.com") || !url.startsWith("http"))) {
-        addLog("Supabase URL이 잘못되었습니다. 'https://xxx.supabase.co' 형태의 API URL을 입력해주세요.", "error");
+      const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      
+      if (!url || !key) {
+        addLog("Supabase 설정이 감지되지 않았습니다. 만약 Vercel/GitHub에 배포하셨다면 Settings -> Environment Variables에서 VITE_SUPABASE_URL과 VITE_SUPABASE_ANON_KEY를 추가하고 재배포해야 합니다.", "info");
+      } else if (url && (url.includes("supabase.com") || !url.startsWith("http"))) {
+        addLog("Supabase URL 형식이 잘못되었습니다. 'Project Settings -> API'에 있는 https://xxx.supabase.co 형태의 URL을 사용해주세요.", "error");
       } else {
-        addLog("Supabase 설정이 없어 로컬에만 저장되었습니다. (Settings 메뉴에서 API 설정을 완료해주세요)", "info");
+        addLog("Supabase 연동이 준비되지 않았습니다. (Settings 메뉴에서 설정을 확인해주세요)", "info");
       }
     }
   };
@@ -134,20 +140,22 @@ export default function App() {
     if (!confirm("이 정산 내역을 정말로 삭제하시겠습니까?")) return;
     
     setIsDeletingId(id);
-    // Save to Supabase
+    // Remove from Supabase
     const supabase = getSupabase();
     if (supabase) {
       try {
         const { error } = await supabase.from('settlement_history').delete().eq('id', id);
         if (error) {
-          console.error("Supabase delete error:", error);
+          console.error("Supabase delete error details:", error);
           throw error;
         }
         addLog("클라우드 데이터베이스에서 내역이 삭제되었습니다.", 'info');
       } catch (err: any) {
-        addLog(`DB 삭제 실패: ${err.message}.`, 'error');
-        if (err.message.includes("403") || err.message.includes("policy")) {
-          addLog("팁: Supabase Table Editor -> RLS Policies에서 DELETE 권한을 'anon'에 허용해주세요.", "info");
+        console.error("Supabase delete error:", err);
+        const isAuthError = err.message?.includes("403") || err.code === '42501' || err.status === 403;
+        addLog(`DB 삭제 실패: ${err.message || '네트워크 오류'}`, 'error');
+        if (isAuthError) {
+          addLog("권한 오류: Supabase RLS Policies에서 DELETE 권한을 'anon' 역할에 허용했는지 확인해주세요.", "info");
         }
       }
     }
@@ -209,6 +217,28 @@ export default function App() {
   // Auto Settlement State
   const [autoSettlementFile, setAutoSettlementFile] = useState<File | null>(null);
   const [autoSettlementData, setAutoSettlementData] = useState<SettlementTotal | null>(null);
+  
+  // Branch Info State (Editable)
+  const [branchInfo, setBranchInfo] = useState<Record<string, { account: string, email: string }>>(BRANCH_INFO);
+  const [editingBranch, setEditingBranch] = useState<string | null>(null);
+  const [branchEditForm, setBranchEditForm] = useState<{ account: string, email: string } | null>(null);
+
+  const startEditingBranch = (region: string) => {
+    setEditingBranch(region);
+    setBranchEditForm({ ...branchInfo[region] });
+  };
+
+  const saveBranchEdit = () => {
+    if (editingBranch && branchEditForm) {
+      setBranchInfo(prev => ({
+        ...prev,
+        [editingBranch]: branchEditForm
+      }));
+      setEditingBranch(null);
+      setBranchEditForm(null);
+      addLog(`${editingBranch}지회의 송금 정보가 수정되었습니다.`, 'success');
+    }
+  };
   
   const [customRequirement, setCustomRequirement] = useState("");
   const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
@@ -334,6 +364,11 @@ export default function App() {
     setErrorDiagnosis(null);
     addLog(`파일 업로드 확인: ${selectedFile.name}`);
     
+    // Suggest period from filename
+    const suggestedPeriod = selectedFile.name.substring(0, selectedFile.name.lastIndexOf('.')) || selectedFile.name;
+    setAutoPeriod(suggestedPeriod);
+    setManualPeriod(suggestedPeriod);
+
     try {
       setIsAnalyzing(true);
       const data = await parseFullWorkbook(selectedFile);
@@ -436,6 +471,12 @@ export default function App() {
     setAutoSettlementFile(selectedFile);
     addLog(`정산 파일 업로드: ${selectedFile.name}`);
     
+    // Requirement: Suggest period from filename
+    // Example: "2026-1분기-정산.xlsx" -> "2026-1분기-정산"
+    const suggestedPeriod = selectedFile.name.substring(0, selectedFile.name.lastIndexOf('.')) || selectedFile.name;
+    setAutoPeriod(suggestedPeriod);
+    setManualPeriod(suggestedPeriod);
+
     try {
       const data = await parseFullWorkbook(selectedFile);
       const counts: Record<string, number> = { '경북': 0, '구미': 0, '상주': 0, '경주': 0 };
@@ -451,13 +492,17 @@ export default function App() {
           else if (regionValue.includes("상주")) counts['상주']++;
           else if (regionValue.includes("경주")) counts['경주']++;
           else if (regionValue.includes("경북")) counts['경북']++;
-          // Fallback matches from PRD regions
         });
       });
 
       const settlement = calculateSettlement(counts);
       setAutoSettlementData(settlement);
+      
+      // Requirement: Update manual counts so Manual tab reflects these results
+      setManualCounts(counts);
+
       addLog(`자동 정산 완료: 총 ${settlement.totalDistributed.toLocaleString()}원 분배 대상`, 'success');
+      addLog(`결과가 '수동 정산' 탭에도 반영되었습니다.`, 'info');
     } catch (err: any) {
       addLog(`정산 분석 오류: ${err.message}`, 'error');
     }
@@ -746,6 +791,19 @@ export default function App() {
 
           {activeTab === 'manual' && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+              <div className="bg-indigo-50 border border-indigo-200 p-5 rounded-3xl flex items-start gap-4 mb-2 shadow-sm">
+                <div className="p-2 bg-indigo-100 text-indigo-600 rounded-xl">
+                  <FileUp size={24} />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-indigo-900">데이터 입력 안내</p>
+                  <p className="text-xs text-indigo-700 leading-relaxed mt-1">
+                    수동 정산 탭은 데이터를 직접 입력하거나, <b>'자동 정산'</b> 탭에서 업로드된 엑셀 데이터를 자동으로 불러올 수 있습니다. <br/>
+                    대량의 데이터를 처리하시려면 먼저 <b>자동 정산 탭에서 파일을 업로드</b> 하세요.
+                  </p>
+                </div>
+              </div>
+
               <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50">
                 <div className="flex items-center gap-4 mb-8 border-b pb-6">
                   <div className="p-3 bg-rose-50 text-rose-600 rounded-2xl">
@@ -854,22 +912,66 @@ export default function App() {
 
               {/* Branch Account Info */}
               <div className="bg-white p-6 rounded-3xl border border-slate-200">
-                <h3 className="text-sm font-bold text-slate-800 mb-4 flex items-center gap-2">
-                  <Database size={16} className="text-indigo-600" /> 지회별 송금 정보
-                </h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                    <Database size={16} className="text-indigo-600" /> 지회별 송금 정보
+                  </h3>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase">Editable branch info</p>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                   {Object.entries(BRANCH_INFO).map(([region, info]) => (
-                     <div key={region} className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex justify-between items-center">
-                        <div className="space-y-1">
-                           <p className="text-xs font-bold text-slate-900">{region}지회</p>
-                           <p className="text-[10px] text-slate-500">{info.account}</p>
+                   {(Object.entries(branchInfo) as [string, { account: string, email: string }][]).map(([region, info]) => (
+                     <div key={region} className={cn(
+                       "p-4 rounded-xl border transition-all",
+                       editingBranch === region ? "bg-indigo-50 border-indigo-200 ring-4 ring-indigo-50" : "bg-slate-50 border-slate-100"
+                     )}>
+                        <div className="flex justify-between items-start mb-2">
+                           <span className="text-xs font-bold text-slate-900">{region}지회</span>
+                           <div className="flex items-center gap-1">
+                             {editingBranch === region ? (
+                               <>
+                                 <button onClick={saveBranchEdit} className="p-1 px-2 bg-indigo-600 text-white rounded text-[10px] font-bold">저장</button>
+                                 <button onClick={() => setEditingBranch(null)} className="p-1 px-2 bg-slate-200 text-slate-600 rounded text-[10px] font-bold">취소</button>
+                               </>
+                             ) : (
+                               <button 
+                                 onClick={() => startEditingBranch(region)}
+                                 className="p-1 text-slate-400 hover:text-indigo-600 transition-colors"
+                                 title="정보 수정"
+                               >
+                                 <Edit3 size={14} />
+                               </button>
+                             )}
+                           </div>
                         </div>
-                        <button 
-                          onClick={() => copyToClipboard(info.account, `${region} 계좌`)}
-                          className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"
-                        >
-                          <Copy size={14} />
-                        </button>
+                        
+                        {editingBranch === region && branchEditForm ? (
+                          <div className="space-y-2">
+                            <input 
+                              type="text" 
+                              value={branchEditForm.account}
+                              onChange={e => setBranchEditForm({...branchEditForm, account: e.target.value})}
+                              className="w-full px-2 py-1.5 text-[11px] border rounded bg-white"
+                              placeholder="계좌 정보 입력"
+                            />
+                            <input 
+                              type="text" 
+                              value={branchEditForm.email}
+                              onChange={e => setBranchEditForm({...branchEditForm, email: e.target.value})}
+                              className="w-full px-2 py-1.5 text-[11px] border rounded bg-white"
+                              placeholder="이메일 주소 입력"
+                            />
+                          </div>
+                        ) : (
+                          <div className="flex justify-between items-center group">
+                            <p className="text-[11px] text-slate-600 font-medium truncate pr-2">{info.account}</p>
+                            <button 
+                              onClick={() => copyToClipboard(info.account, `${region} 계좌`)}
+                              className="p-1.5 text-slate-400 hover:text-indigo-600 transition-colors opacity-0 group-hover:opacity-100"
+                            >
+                              <Copy size={12} />
+                            </button>
+                          </div>
+                        )}
                      </div>
                    ))}
                 </div>
@@ -968,7 +1070,7 @@ export default function App() {
                         <Database size={16} className="text-amber-600" /> 지회별 송금 정보
                       </h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {Object.entries(BRANCH_INFO).map(([region, info]) => (
+                        {(Object.entries(branchInfo) as [string, { account: string, email: string }][]).map(([region, info]) => (
                           <div key={region} className="p-3 bg-white rounded-xl border border-slate-100 flex justify-between items-center">
                               <div className="space-y-1">
                                 <p className="text-xs font-bold text-slate-900">{region}지회</p>
