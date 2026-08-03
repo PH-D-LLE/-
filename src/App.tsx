@@ -347,12 +347,23 @@ export default function App() {
 귀 지회의 헌신에 늘 감사드립니다.`;
   };
 
-  const getActiveDraft = (region: string) => {
-    const custom = customDrafts[`${region}_${activeMessageType}`];
+  const getActiveDraft = (region: string, type: 'mail' | 'sms' = activeMessageType) => {
+    const custom = customDrafts[`${region}_${type}`];
     if (custom) return custom;
     
-    if (activeMessageType === 'mail') return getMailDraft(region);
+    if (type === 'mail') return getMailDraft(region);
     return { title: "", body: getSmsDraft(region) };
+  };
+
+  const updateDraft = (region: string, type: 'mail' | 'sms', field: 'title' | 'body', value: string) => {
+    const current = getActiveDraft(region, type);
+    setCustomDrafts(prev => ({
+      ...prev,
+      [`${region}_${type}`]: {
+        ...current,
+        [field]: value
+      }
+    }));
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -962,14 +973,29 @@ export default function App() {
                             />
                           </div>
                         ) : (
-                          <div className="flex justify-between items-center group">
-                            <p className="text-[11px] text-slate-600 font-medium truncate pr-2">{info.account}</p>
-                            <button 
-                              onClick={() => copyToClipboard(info.account, `${region} 계좌`)}
-                              className="p-1.5 text-slate-400 hover:text-indigo-600 transition-colors opacity-0 group-hover:opacity-100"
-                            >
-                              <Copy size={12} />
-                            </button>
+                          <div className="space-y-1.5 mt-1">
+                            <div className="flex justify-between items-center group">
+                              <p className="text-[11px] text-slate-700 font-medium truncate pr-2">🏦 {info.account}</p>
+                              <button 
+                                onClick={() => copyToClipboard(info.account, `${region} 계좌`)}
+                                className="p-1 text-slate-400 hover:text-indigo-600 transition-colors opacity-0 group-hover:opacity-100"
+                                title="계좌 복사"
+                              >
+                                <Copy size={12} />
+                              </button>
+                            </div>
+                            <div className="flex justify-between items-center group">
+                              <p className="text-[11px] text-slate-500 font-normal truncate pr-2">✉ {info.email || '이메일 미등록'}</p>
+                              {info.email && (
+                                <button 
+                                  onClick={() => copyToClipboard(info.email, `${region} 이메일`)}
+                                  className="p-1 text-slate-400 hover:text-indigo-600 transition-colors opacity-0 group-hover:opacity-100"
+                                  title="이메일 복사"
+                                >
+                                  <Copy size={12} />
+                                </button>
+                              )}
+                            </div>
                           </div>
                         )}
                      </div>
@@ -1066,22 +1092,81 @@ export default function App() {
 
                     {/* Branch Account Info for Auto */}
                     <div className="bg-slate-50 p-6 rounded-3xl border border-slate-200">
-                      <h3 className="text-sm font-bold text-slate-800 mb-4 flex items-center gap-2">
-                        <Database size={16} className="text-amber-600" /> 지회별 송금 정보
-                      </h3>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                          <Database size={16} className="text-amber-600" /> 지회별 송금 정보
+                        </h3>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase">Editable branch info</p>
+                      </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {(Object.entries(branchInfo) as [string, { account: string, email: string }][]).map(([region, info]) => (
-                          <div key={region} className="p-3 bg-white rounded-xl border border-slate-100 flex justify-between items-center">
-                              <div className="space-y-1">
-                                <p className="text-xs font-bold text-slate-900">{region}지회</p>
-                                <p className="text-[10px] text-slate-500">{info.account}</p>
+                          <div key={region} className={cn(
+                            "p-4 rounded-xl border transition-all",
+                            editingBranch === region ? "bg-amber-50 border-amber-200 ring-4 ring-amber-50" : "bg-white border-slate-100"
+                          )}>
+                            <div className="flex justify-between items-start mb-2">
+                              <span className="text-xs font-bold text-slate-900">{region}지회</span>
+                              <div className="flex items-center gap-1">
+                                {editingBranch === region ? (
+                                  <>
+                                    <button onClick={saveBranchEdit} className="p-1 px-2 bg-amber-600 text-white rounded text-[10px] font-bold">저장</button>
+                                    <button onClick={() => setEditingBranch(null)} className="p-1 px-2 bg-slate-200 text-slate-600 rounded text-[10px] font-bold">취소</button>
+                                  </>
+                                ) : (
+                                  <button 
+                                    onClick={() => startEditingBranch(region)}
+                                    className="p-1 text-slate-400 hover:text-amber-600 transition-colors"
+                                    title="정보 수정"
+                                  >
+                                    <Edit3 size={14} />
+                                  </button>
+                                )}
                               </div>
-                              <button 
-                                onClick={() => copyToClipboard(info.account, `${region} 계좌`)}
-                                className="p-2 text-slate-400 hover:text-amber-600 transition-colors"
-                              >
-                                <Copy size={14} />
-                              </button>
+                            </div>
+                            
+                            {editingBranch === region && branchEditForm ? (
+                              <div className="space-y-2">
+                                <input 
+                                  type="text" 
+                                  value={branchEditForm.account}
+                                  onChange={e => setBranchEditForm({...branchEditForm, account: e.target.value})}
+                                  className="w-full px-2 py-1.5 text-[11px] border rounded bg-white"
+                                  placeholder="계좌 정보 입력"
+                                />
+                                <input 
+                                  type="text" 
+                                  value={branchEditForm.email}
+                                  onChange={e => setBranchEditForm({...branchEditForm, email: e.target.value})}
+                                  className="w-full px-2 py-1.5 text-[11px] border rounded bg-white"
+                                  placeholder="이메일 주소 입력"
+                                />
+                              </div>
+                            ) : (
+                              <div className="space-y-1.5 mt-1">
+                                <div className="flex justify-between items-center group">
+                                  <p className="text-[11px] text-slate-700 font-medium truncate pr-2">🏦 {info.account}</p>
+                                  <button 
+                                    onClick={() => copyToClipboard(info.account, `${region} 계좌`)}
+                                    className="p-1 text-slate-400 hover:text-amber-600 transition-colors opacity-0 group-hover:opacity-100"
+                                    title="계좌 복사"
+                                  >
+                                    <Copy size={12} />
+                                  </button>
+                                </div>
+                                <div className="flex justify-between items-center group">
+                                  <p className="text-[11px] text-slate-500 font-normal truncate pr-2">✉ {info.email || '이메일 미등록'}</p>
+                                  {info.email && (
+                                    <button 
+                                      onClick={() => copyToClipboard(info.email, `${region} 이메일`)}
+                                      className="p-1 text-slate-400 hover:text-amber-600 transition-colors opacity-0 group-hover:opacity-100"
+                                      title="이메일 복사"
+                                    >
+                                      <Copy size={12} />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1537,17 +1622,24 @@ export default function App() {
                           <>
                             <div className="space-y-4">
                               <div className="flex items-center justify-between">
-                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] bg-slate-100 px-2 py-1 rounded">Subject</span>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] bg-slate-100 px-2 py-1 rounded">Subject</span>
+                                  <span className="text-[10px] text-indigo-500 font-bold">(직접 수정 가능)</span>
+                                </div>
                                 <button 
-                                  onClick={() => copyToClipboard(getActiveDraft(activeEmailRegion).title, '제목')}
+                                  onClick={() => copyToClipboard(getActiveDraft(activeEmailRegion, 'mail').title, '제목')}
                                   className="text-xs text-indigo-600 font-bold flex items-center gap-1.5 hover:bg-indigo-50 px-3 py-1.5 rounded-lg transition-colors border border-indigo-100"
                                 >
                                   <Copy size={12} /> 제목 복사
                                 </button>
                               </div>
-                              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 text-base font-bold text-slate-800 leading-snug">
-                                {getActiveDraft(activeEmailRegion).title}
-                              </div>
+                              <input 
+                                type="text"
+                                value={getActiveDraft(activeEmailRegion, 'mail').title}
+                                onChange={(e) => updateDraft(activeEmailRegion, 'mail', 'title', e.target.value)}
+                                className="w-full bg-slate-50 p-4 rounded-2xl border border-slate-200 text-base font-bold text-slate-800 leading-snug focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                                placeholder="이메일 제목을 입력하거나 수정하세요"
+                              />
                               <div className="mt-8 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100">
                                 <h4 className="text-xs font-bold text-indigo-900 mb-2 flex items-center gap-2">
                                    <Filter size={14} /> 작성 팁
@@ -1561,35 +1653,46 @@ export default function App() {
 
                             <div className="space-y-4">
                               <div className="flex items-center justify-between">
-                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] bg-slate-100 px-2 py-1 rounded">Body Content</span>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] bg-slate-100 px-2 py-1 rounded">Body Content</span>
+                                  <span className="text-[10px] text-indigo-500 font-bold">(직접 수정 가능)</span>
+                                </div>
                                 <button 
-                                  onClick={() => copyToClipboard(getActiveDraft(activeEmailRegion).body, '본문')}
+                                  onClick={() => copyToClipboard(getActiveDraft(activeEmailRegion, 'mail').body, '본문')}
                                   className="text-xs text-indigo-600 font-bold flex items-center gap-1.5 hover:bg-indigo-50 px-3 py-1.5 rounded-lg transition-colors border border-indigo-100"
                                 >
                                   <Copy size={12} /> 본문 전체 복사
                                 </button>
                               </div>
-                              <div className="bg-slate-50 p-6 rounded-2xl border border-slate-100 text-sm text-slate-700 whitespace-pre-wrap leading-relaxed min-h-[350px] font-medium shadow-inner shadow-slate-200/20">
-                                {getActiveDraft(activeEmailRegion).body}
-                              </div>
+                              <textarea 
+                                value={getActiveDraft(activeEmailRegion, 'mail').body}
+                                onChange={(e) => updateDraft(activeEmailRegion, 'mail', 'body', e.target.value)}
+                                className="w-full bg-slate-50 p-6 rounded-2xl border border-slate-200 text-sm text-slate-700 leading-relaxed min-h-[350px] font-medium shadow-inner shadow-slate-200/20 focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all resize-y"
+                                placeholder="이메일 본문 내용을 입력하거나 수정하세요"
+                              />
                             </div>
                           </>
                         ) : (
                           <>
                             <div className="space-y-4">
                               <div className="flex items-center justify-between">
-                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] bg-slate-100 px-2 py-1 rounded">SMS / MMS</span>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] bg-slate-100 px-2 py-1 rounded">SMS / MMS</span>
+                                  <span className="text-[10px] text-emerald-500 font-bold">(직접 수정 가능)</span>
+                                </div>
                                 <button 
-                                  onClick={() => copyToClipboard(getActiveDraft(activeEmailRegion).body, '문자 내용')}
+                                  onClick={() => copyToClipboard(getActiveDraft(activeEmailRegion, 'sms').body, '문자 내용')}
                                   className="text-xs text-indigo-600 font-bold flex items-center gap-1.5 hover:bg-indigo-50 px-3 py-1.5 rounded-lg transition-colors border border-indigo-100"
                                 >
                                   <Copy size={12} /> 내용 복사
                                 </button>
                               </div>
-                              <div className="bg-slate-900 p-6 rounded-3xl border border-slate-700 text-sm text-emerald-400 whitespace-pre-wrap leading-relaxed min-h-[250px] font-mono shadow-2xl relative overflow-hidden">
-                                <div className="absolute top-0 left-0 w-full h-1 bg-indigo-500" />
-                                {getActiveDraft(activeEmailRegion).body}
-                              </div>
+                              <textarea 
+                                value={getActiveDraft(activeEmailRegion, 'sms').body}
+                                onChange={(e) => updateDraft(activeEmailRegion, 'sms', 'body', e.target.value)}
+                                className="w-full bg-slate-900 p-6 rounded-3xl border border-slate-700 text-sm text-emerald-400 leading-relaxed min-h-[250px] font-mono shadow-2xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all resize-y"
+                                placeholder="SMS/문자 메세지 내용을 입력하거나 수정하세요"
+                              />
                             </div>
                             <div className="space-y-4 flex flex-col justify-center">
                               <div className="p-6 bg-slate-50 rounded-2xl border border-slate-200">

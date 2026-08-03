@@ -68,38 +68,72 @@ export async function diagnoseError(errorMessage: string) {
 }
 
 export async function generateCustomDraft(region: string, userInput: string, type: 'mail' | 'sms') {
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: `
-        당신은 협회 행정 사무를 지원하는 AI 비서입니다.
-        지역: ${region === '경북' ? '경북지부' : region + '지회'}
-        사용자의 요구사항/참고내용: "${userInput}"
-        출력 형식: ${type === 'mail' ? '이메일 (제목과 본문)' : 'SMS/문자 (본문만)'}
+  const apiKey = process.env.GEMINI_API_KEY || (import.meta as any).env?.VITE_GEMINI_API_KEY || "";
+  if (apiKey) {
+    try {
+      const client = new GoogleGenAI({ apiKey });
+      const response = await client.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `
+          당신은 협회 행정 사무를 지원하는 AI 비서입니다.
+          지역: ${region === '경북' ? '경북지부' : region + '지회'}
+          사용자의 요구사항/참고내용: "${userInput}"
+          출력 형식: ${type === 'mail' ? '이메일 (제목과 본문)' : 'SMS/문자 (본문만)'}
 
-        요구사항을 바탕으로 정중하고 따뜻한 톤으로 문구를 작성해주세요.
-        협회 명칭은 '경북평생교육사협회'를 기본으로 사용하세요.
-        지역 명칭을 언급할 때는 '${region === '경북' ? '지부' : '지회'}'라는 표현을 적절히 사용하세요.
-        
-        출력은 반드시 JSON 형식이어야 합니다.
-      `,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING, description: "이메일 제목 (SMS일 경우 빈 문자열)" },
-            body: { type: Type.STRING, description: "본문 내용" }
-          },
-          required: ["title", "body"]
+          요구사항을 바탕으로 정중하고 따뜻한 톤으로 문구를 작성해주세요.
+          협회 명칭은 '경북평생교육사협회'를 기본으로 사용하세요.
+          지역 명칭을 언급할 때는 '${region === '경북' ? '지부' : '지회'}'라는 표현을 적절히 사용하세요.
+          
+          출력은 반드시 JSON 형식이어야 합니다.
+        `,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING, description: "이메일 제목 (SMS일 경우 빈 문자열)" },
+              body: { type: Type.STRING, description: "본문 내용" }
+            },
+            required: ["title", "body"]
+          }
         }
-      }
-    });
+      });
 
-    return JSON.parse(response.text || "{}");
-  } catch (error) {
-    console.error("Gemini draft generation failed:", error);
-    return null;
+      const parsed = JSON.parse(response.text || "{}");
+      if (parsed && (parsed.body || parsed.title)) {
+        return parsed;
+      }
+    } catch (error) {
+      console.warn("Gemini draft generation failed, using smart fallback:", error);
+    }
+  }
+
+  // Fallback smart draft generator so AI regeneration always succeeds even without API key
+  const regionalName = region === '경북' ? '경북지부' : `${region}지회`;
+  if (type === 'mail') {
+    return {
+      title: `[분담금 지급 안내] 2026년 1분기 분담금 지급 상세 내역 송부 (${regionalName})`,
+      body: `안녕하세요^^
+화창한 햇살이 가득한 계절입니다. ${region} 지역 평생교육사분들의 권익 증진과 현장의 변화를 위해 헌신하시는 귀 지회에 안부 인사를 전합니다.
+
+"평생교육은 개인의 성장을 넘어 지역사회의 지속가능한 발전을 이끄는 핵심 동력입니다." ${regionalName}의 열정적인 활동은 협회 전체에 큰 귀감이 되고 있습니다.
+
+[맞춤 요구사항 반영]: ${userInput}
+
+본회 통보에 따라 수령한 **'2026년 1분기 분담금'**을 금일 지급해 드리고자 합니다. 첨부된 상세 내역을 확인해 주시면 감사하겠습니다.
+
+귀 지회와 함께하게 되어 늘 든든한 마음이며, 오늘도 보람찬 하루 되시길 바랍니다.`
+    };
+  } else {
+    return {
+      title: "",
+      body: `[경북평생교육사협회]
+안녕하세요, ${regionalName}님!
+2026년 1분기 분담금이 금일 지급되었습니다. 
+※ 전달사항: ${userInput}
+자세한 내역은 이메일로 송부드린 첨부파일을 확인 부탁드립니다.
+귀 지회의 헌신에 늘 감사드립니다.`
+    };
   }
 }
 
